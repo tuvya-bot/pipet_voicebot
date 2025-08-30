@@ -1,0 +1,451 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nova Sonic - Seamless Audio Client</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin: 20px 0;
+            justify-content: center;
+        }
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        .start-btn {
+            background-color: #4CAF50;
+            color: white;
+        }
+        .stop-btn {
+            background-color: #f44336;
+            color: white;
+        }
+        .status {
+            text-align: center;
+            margin: 20px 0;
+            padding: 10px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .connected { background-color: #d4edda; color: #155724; }
+        .disconnected { background-color: #f8d7da; color: #721c24; }
+        .recording { background-color: #fff3cd; color: #856404; }
+        .log {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 15px;
+            margin-top: 20px;
+            max-height: 400px;
+            overflow-y: auto;
+            font-family: Arial, sans-serif;
+            font-size: 14px;
+        }
+        .transcript-user {
+            color: #0066cc;
+            font-weight: bold;
+            margin: 10px 0;
+            padding: 8px;
+            background-color: #e3f2fd;
+            border-radius: 5px;
+        }
+        .transcript-assistant {
+            color: #cc6600;
+            font-weight: bold;
+            margin: 10px 0;
+            padding: 8px;
+            background-color: #fff3cd;
+            border-radius: 5px;
+        }
+        .debug-message {
+            color: #666;
+            font-size: 11px;
+            font-family: monospace;
+        }
+        .audio-info {
+            background-color: #e8f5e8;
+            border: 1px solid #4CAF50;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Nova Sonic - Seamless Audio Client</h1>
+        
+        <div class="controls">
+            <button id="startBtn" class="start-btn">Connect & Start</button>
+            <button id="stopBtn" class="stop-btn" disabled>Stop & Disconnect</button>
+        </div>
+
+        <div id="status" class="status disconnected">Disconnected</div>
+        
+        <div class="audio-info">
+            <h3>Audio Status</h3>
+            <div id="audioStatus">Ready to connect</div>
+        </div>
+        
+        <div class="log">
+            <h3>Conversation</h3>
+            <div id="logMessages"></div>
+        </div>
+    </div>
+
+    <script>
+
+
+        class SeamlessAudioClient {
+            constructor() {
+                this.websocket = null;
+                this.audioContext = null;
+                this.audioWorkletNode = null;
+                this.isRecording = false;
+                this.isConnected = false;
+                this.bufferSize = 0;
+                this.showDebugMessages = true; // Enable debug messages by default
+                
+                this.startBtn = document.getElementById('startBtn');
+                this.stopBtn = document.getElementById('stopBtn');
+                this.status = document.getElementById('status');
+                this.logMessages = document.getElementById('logMessages');
+                this.audioStatus = document.getElementById('audioStatus');
+                
+                this.setupEventListeners();
+                this.addTranscript('System', 'Ready to start conversation...');
+            }
+            
+            setupEventListeners() {
+                this.startBtn.addEventListener('click', () => this.start());
+                this.stopBtn.addEventListener('click', () => this.stop());
+            }
+            
+            log(message) {
+                if (this.showDebugMessages) {
+                    const timestamp = new Date().toLocaleTimeString();
+                    const logEntry = document.createElement('div');
+                    logEntry.className = 'debug-message';
+                    logEntry.textContent = `[${timestamp}] ${message}`;
+                    this.logMessages.appendChild(logEntry);
+                    this.logMessages.scrollTop = this.logMessages.scrollHeight;
+                }
+                console.log(message);
+            }
+            
+            addTranscript(role, content) {
+                if (!role || !content) {
+                    console.warn('Invalid transcript data:', { role, content });
+                    return;
+                }
+                
+                const timestamp = new Date().toLocaleTimeString();
+                const logEntry = document.createElement('div');
+                
+                if (role.toLowerCase() === 'user') {
+                    logEntry.className = 'transcript-user';
+                    logEntry.textContent = `👤 You [${timestamp}]: ${content}`;
+                } else if (role.toLowerCase() === 'assistant') {
+                    logEntry.className = 'transcript-assistant';
+                    logEntry.textContent = `🤖 Assistant [${timestamp}]: ${content}`;
+                } else {
+                    logEntry.textContent = `${role} [${timestamp}]: ${content}`;
+                }
+                
+                this.logMessages.appendChild(logEntry);
+                this.logMessages.scrollTop = this.logMessages.scrollHeight;
+                
+                // Log to console for debugging
+                console.log(`Added transcript: ${role} - ${content}`);
+            }
+            
+            updateAudioStatus(message) {
+                this.audioStatus.textContent = message;
+            }
+            
+            async start() {
+                try {
+                    this.log('Starting connection...');
+                    await this.initAudioWorklet();
+                    await this.connectWebSocket();
+                    await this.startAudioCapture();
+                    
+                    this.startBtn.disabled = true;
+                    this.stopBtn.disabled = false;
+                    this.updateStatus('Connected & Recording', 'recording');
+                    this.updateAudioStatus('Connected - seamless audio ready');
+                    this.log('Successfully started with seamless audio');
+                    
+                } catch (error) {
+                    this.log(`Error: ${error.message}`);
+                    this.updateStatus('Connection Failed', 'disconnected');
+                }
+            }
+            
+            async stop() {
+                this.log('Stopping...');
+                this.stopAudioCapture();
+                this.disconnectWebSocket();
+                
+                // Stop audio worklet
+                if (this.audioWorkletNode) {
+                    this.audioWorkletNode.port.postMessage({ type: 'stop' });
+                    this.audioWorkletNode.disconnect();
+                    this.audioWorkletNode = null;
+                }
+                
+                // Close audio context
+                if (this.audioContext) {
+                    await this.audioContext.close();
+                    this.audioContext = null;
+                }
+                
+                this.startBtn.disabled = false;
+                this.stopBtn.disabled = true;
+                this.updateStatus('Disconnected', 'disconnected');
+                this.updateAudioStatus('Disconnected');
+                this.log('Stopped');
+            }
+            
+            async initAudioWorklet() {
+                try {
+                    this.log('Initializing AudioWorklet...');
+                    
+                    // Create audio context
+                    this.audioContext = new AudioContext({ sampleRate: 16000 });
+                    
+                    // Add the worklet module from separate file
+                    await this.audioContext.audioWorklet.addModule('./seamless-audio-processor.js');
+                    
+                    // Create the worklet node
+                    this.audioWorkletNode = new AudioWorkletNode(this.audioContext, 'seamless-audio-processor');
+                    
+                    // Handle messages from worklet
+                    this.audioWorkletNode.port.onmessage = (event) => {
+                        if (event.data === 'needData') {
+                            this.updateAudioStatus('Buffer low - requesting more data');
+                        }
+                    };
+                    
+                    // Connect to destination
+                    this.audioWorkletNode.connect(this.audioContext.destination);
+                    
+                    // Resume context if suspended
+                    if (this.audioContext.state === 'suspended') {
+                        await this.audioContext.resume();
+                    }
+                    
+                    this.log('AudioWorklet initialized successfully');
+                    
+                } catch (error) {
+                    throw new Error(`Failed to initialize AudioWorklet: ${error.message}`);
+                }
+            }
+            
+            async connectWebSocket() {
+                return new Promise((resolve, reject) => {
+                    const url = 'ws://localhost:8000/ws';
+                    // Use the correct protocol format
+                    this.websocket = new WebSocket(url, 'nova-sonic-enhanced-api-key');
+                    
+                    this.websocket.onopen = () => {
+                        this.log('WebSocket connected');
+                        this.isConnected = true;
+                        resolve();
+                    };
+                    
+                    this.websocket.onmessage = (event) => {
+                        this.handleWebSocketMessage(event.data);
+                    };
+                    
+                    this.websocket.onclose = () => {
+                        this.log('WebSocket disconnected');
+                        this.isConnected = false;
+                        this.updateStatus('Disconnected', 'disconnected');
+                    };
+                    
+                    this.websocket.onerror = (error) => {
+                        this.log('WebSocket error');
+                        reject(new Error('WebSocket connection failed'));
+                    };
+                    
+                    setTimeout(() => {
+                        if (!this.isConnected) {
+                            reject(new Error('Connection timeout'));
+                        }
+                    }, 5000);
+                });
+            }
+            
+            disconnectWebSocket() {
+                if (this.websocket) {
+                    this.websocket.close();
+                    this.websocket = null;
+                }
+                this.isConnected = false;
+            }
+            
+            async startAudioCapture() {
+                try {
+                    this.log('Requesting microphone access...');
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: {
+                            sampleRate: 16000,
+                            channelCount: 1,
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true
+                        } 
+                    });
+                    
+                    this.log('Microphone access granted');
+                    
+                    // Create input audio context
+                    const inputContext = new AudioContext({ sampleRate: 16000 });
+                    const source = inputContext.createMediaStreamSource(stream);
+                    
+                    // Create processor for input
+                    const processor = inputContext.createScriptProcessor(1024, 1, 1);
+                    
+                    processor.onaudioprocess = (event) => {
+                        if (this.isConnected && this.websocket.readyState === WebSocket.OPEN) {
+                            const inputBuffer = event.inputBuffer;
+                            const inputData = inputBuffer.getChannelData(0);
+                            
+                            // Convert float32 to int16
+                            const int16Array = new Int16Array(inputData.length);
+                            for (let i = 0; i < inputData.length; i++) {
+                                const sample = Math.max(-1, Math.min(1, inputData[i]));
+                                int16Array[i] = Math.round(sample * 32767);
+                            }
+                            
+                            // Convert to base64 and send
+                            const base64Audio = btoa(String.fromCharCode(...new Uint8Array(int16Array.buffer)));
+                            this.websocket.send(base64Audio);
+                        }
+                    };
+                    
+                    source.connect(processor);
+                    processor.connect(inputContext.destination);
+                    
+                    this.isRecording = true;
+                    this.log('Audio capture started');
+                    
+                } catch (error) {
+                    throw new Error(`Failed to access microphone: ${error.message}`);
+                }
+            }
+            
+            stopAudioCapture() {
+                this.isRecording = false;
+                this.log('Audio capture stopped');
+            }
+            
+            handleWebSocketMessage(data) {
+                try {
+                    const message = JSON.parse(data);
+                    
+                    if (message.event === 'media') {
+                        const sampleRate = message.sample_rate || 16000;
+                        const channels = message.channels || 1;
+                        
+                        // Process audio data for seamless playback
+                        this.processAudioData(message.data, sampleRate, channels);
+                        
+                    } else if (message.event === 'transcript') {
+                        // Handle transcript messages from server
+                        this.addTranscript(message.role, message.content);
+                        console.log(`Transcript received: ${message.role}: ${message.content}`);
+                        
+                    } else if (message.event === 'stop') {
+                        this.log('Received stop signal');
+                        if (this.audioWorkletNode) {
+                            this.audioWorkletNode.port.postMessage({ type: 'stop' });
+                        }
+                    }
+                    
+                } catch (error) {
+                    // Try to handle raw transcript messages
+                    if (typeof data === 'string' && data.includes('Transcript:')) {
+                        const transcriptMatch = data.match(/Transcript: \[([^\]]+)\] (user|assistant): (.+)/);
+                        if (transcriptMatch) {
+                            const [, timestamp, role, content] = transcriptMatch;
+                            this.addTranscript(role, content);
+                            console.log(`Raw transcript: ${role}: ${content}`);
+                            return;
+                        }
+                    }
+                    this.log(`Error parsing message: ${error.message}`);
+                }
+            }
+            
+            processAudioData(base64Audio, sampleRate, channels) {
+                try {
+                    // Decode base64 to bytes
+                    const binaryString = atob(base64Audio);
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    
+                    // Convert to Int16Array
+                    const int16Array = new Int16Array(bytes.buffer);
+                    
+                    // Convert to Float32Array for AudioWorklet
+                    const float32Array = new Float32Array(int16Array.length);
+                    for (let i = 0; i < int16Array.length; i++) {
+                        float32Array[i] = int16Array[i] / 32768.0;
+                    }
+                    
+                    // Send to AudioWorklet for seamless playback
+                    if (this.audioWorkletNode) {
+                        this.audioWorkletNode.port.postMessage({
+                            type: 'data',
+                            audio: float32Array
+                        });
+                    }
+                    
+                    this.bufferSize += float32Array.length;
+                    this.updateAudioStatus(`Seamless playback - buffer: ${Math.round(this.bufferSize / sampleRate * 1000)}ms`);
+                    
+                } catch (error) {
+                    this.log(`Error processing audio: ${error.message}`);
+                }
+            }
+            
+            updateStatus(text, className) {
+                this.status.textContent = text;
+                this.status.className = `status ${className}`;
+            }
+        }
+        
+        // Initialize the client when the page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            new SeamlessAudioClient();
+        });
+    </script>
+</body>
+</html>

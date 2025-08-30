@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nova Sonic Enhanced - PipeCat Client</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 800px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            justify-content: center;
+        }
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            transition: background-color 0.3s;
+        }
+        .start-btn {
+            background-color: #4CAF50;
+            color: white;
+        }
+        .start-btn:hover {
+            background-color: #45a049;
+        }
+        .stop-btn {
+            background-color: #f44336;
+            color: white;
+        }
+        .stop-btn:hover {
+            background-color: #da190b;
+        }
+        .status {
+            text-align: center;
+            margin: 20px 0;
+            padding: 10px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .status.connected {
+            background-color: #d4edda;
+            color: #155724;
+        }
+        .status.disconnected {
+            background-color: #f8d7da;
+            color: #721c24;
+        }
+        .status.recording {
+            background-color: #fff3cd;
+            color: #856404;
+        }
+        .transcript {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 15px;
+            margin-top: 20px;
+            max-height: 400px;
+            overflow-y: auto;
+        }
+        .transcript h3 {
+            margin-top: 0;
+            color: #495057;
+        }
+        .message {
+            margin: 10px 0;
+            padding: 8px;
+            border-radius: 4px;
+        }
+        .user-message {
+            background-color: #e3f2fd;
+            border-left: 4px solid #2196f3;
+        }
+        .assistant-message {
+            background-color: #f3e5f5;
+            border-left: 4px solid #9c27b0;
+        }
+        .config {
+            margin-bottom: 20px;
+            padding: 15px;
+            background-color: #f8f9fa;
+            border-radius: 5px;
+        }
+        .config label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: bold;
+        }
+        .config input {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+        .instructions {
+            background-color: #e7f3ff;
+            border: 1px solid #b3d9ff;
+            border-radius: 5px;
+            padding: 15px;
+            margin-bottom: 20px;
+        }
+        .instructions h3 {
+            margin-top: 0;
+            color: #0066cc;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Nova Sonic Enhanced - PipeCat Client</h1>
+        
+        <div class="instructions">
+            <h3>Instructions:</h3>
+            <ul>
+                <li>Make sure the PipeCat server is running on the configured URL</li>
+                <li>Click "Connect & Start" to begin the voice conversation</li>
+                <li>Speak clearly into your microphone</li>
+                <li>The AI assistant can help with date/time queries and order tracking</li>
+                <li>You can interrupt the assistant at any time by speaking</li>
+            </ul>
+        </div>
+
+        <div class="config">
+            <label for="serverUrl">Server URL:</label>
+            <input type="text" id="serverUrl" value="ws://localhost:8000/ws" placeholder="ws://localhost:8000/ws">
+        </div>
+
+        <div class="controls">
+            <button id="startBtn" class="start-btn">Connect & Start</button>
+            <button id="stopBtn" class="stop-btn" disabled>Stop & Disconnect</button>
+        </div>
+
+        <div id="status" class="status disconnected">Disconnected</div>
+
+        <div class="transcript">
+            <h3>Conversation Transcript</h3>
+            <div id="messages"></div>
+        </div>
+    </div>
+
+    <script>
+        class PipeCatClient {
+            constructor() {
+                this.websocket = null;
+                this.mediaRecorder = null;
+                this.audioContext = null;
+                this.isRecording = false;
+                this.isConnected = false;
+                
+                this.startBtn = document.getElementById('startBtn');
+                this.stopBtn = document.getElementById('stopBtn');
+                this.status = document.getElementById('status');
+                this.messages = document.getElementById('messages');
+                this.serverUrl = document.getElementById('serverUrl');
+                
+                this.setupEventListeners();
+            }
+            
+            setupEventListeners() {
+                this.startBtn.addEventListener('click', () => this.start());
+                this.stopBtn.addEventListener('click', () => this.stop());
+            }
+            
+            async start() {
+                try {
+                    await this.connectWebSocket();
+                    await this.startAudioCapture();
+                    
+                    this.startBtn.disabled = true;
+                    this.stopBtn.disabled = false;
+                    this.updateStatus('Connected & Recording', 'recording');
+                    
+                } catch (error) {
+                    console.error('Failed to start:', error);
+                    this.addMessage('system', `Error: ${error.message}`);
+                    this.updateStatus('Connection Failed', 'disconnected');
+                }
+            }
+            
+            async stop() {
+                this.stopAudioCapture();
+                this.disconnectWebSocket();
+                
+                this.startBtn.disabled = false;
+                this.stopBtn.disabled = true;
+                this.updateStatus('Disconnected', 'disconnected');
+            }
+            
+            async connectWebSocket() {
+                return new Promise((resolve, reject) => {
+                    const url = this.serverUrl.value;
+                    this.websocket = new WebSocket(url, ['nova-sonic-enhanced-api-key']);
+                    
+                    this.websocket.onopen = () => {
+                        console.log('WebSocket connected');
+                        this.isConnected = true;
+                        resolve();
+                    };
+                    
+                    this.websocket.onmessage = (event) => {
+                        this.handleWebSocketMessage(event.data);
+                    };
+                    
+                    this.websocket.onclose = () => {
+                        console.log('WebSocket disconnected');
+                        this.isConnected = false;
+                        this.updateStatus('Disconnected', 'disconnected');
+                    };
+                    
+                    this.websocket.onerror = (error) => {
+                        console.error('WebSocket error:', error);
+                        reject(new Error('WebSocket connection failed'));
+                    };
+                    
+                    // Timeout after 5 seconds
+                    setTimeout(() => {
+                        if (!this.isConnected) {
+                            reject(new Error('Connection timeout'));
+                        }
+                    }, 5000);
+                });
+            }
+            
+            disconnectWebSocket() {
+                if (this.websocket) {
+                    this.websocket.close();
+                    this.websocket = null;
+                }
+                this.isConnected = false;
+            }
+            
+            async startAudioCapture() {
+                try {
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: {
+                            sampleRate: 16000,
+                            channelCount: 1,
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true
+                        } 
+                    });
+                    
+                    // Create audio context for input (16kHz for Nova Sonic input)
+                    this.audioContext = new AudioContext({ sampleRate: 16000 });
+                    const source = this.audioContext.createMediaStreamSource(stream);
+                    
+                    // Use AudioWorklet if available, fallback to ScriptProcessor
+                    if (this.audioContext.audioWorklet) {
+                        // Modern approach with AudioWorklet (better performance)
+                        try {
+                            await this.setupAudioWorklet(source);
+                        } catch (e) {
+                            console.warn('AudioWorklet failed, falling back to ScriptProcessor:', e);
+                            this.setupScriptProcessor(source);
+                        }
+                    } else {
+                        // Fallback for older browsers
+                        this.setupScriptProcessor(source);
+                    }
+                    
+                    this.isRecording = true;
+                    
+                } catch (error) {
+                    throw new Error(`Failed to access microphone: ${error.message}`);
+                }
+            }
+            
+            setupScriptProcessor(source) {
+                // Create a script processor for real-time audio processing
+                const processor = this.audioContext.createScriptProcessor(4096, 1, 1);
+                
+                processor.onaudioprocess = (event) => {
+                    if (this.isConnected && this.websocket.readyState === WebSocket.OPEN) {
+                        const inputBuffer = event.inputBuffer;
+                        const inputData = inputBuffer.getChannelData(0);
+                        
+                        // Convert float32 to int16 with proper clamping
+                        const int16Array = new Int16Array(inputData.length);
+                        for (let i = 0; i < inputData.length; i++) {
+                            // Clamp to prevent overflow and apply slight gain reduction
+                            const sample = Math.max(-1.0, Math.min(1.0, inputData[i] * 0.95));
+                            int16Array[i] = Math.round(sample * 32767);
+                        }
+                        
+                        // Convert to base64 and send
+                        const base64Audio = btoa(String.fromCharCode(...new Uint8Array(int16Array.buffer)));
+                        this.websocket.send(base64Audio);
+                    }
+                };
+                
+                source.connect(processor);
+                processor.connect(this.audioContext.destination);
+            }
+            
+            async setupAudioWorklet(source) {
+                // AudioWorklet approach for better performance (if supported)
+                const workletCode = `
+                    class AudioCaptureProcessor extends AudioWorkletProcessor {
+                        process(inputs, outputs, parameters) {
+                            const input = inputs[0];
+                            if (input.length > 0) {
+                                const inputData = input[0];
+                                
+                                // Convert float32 to int16
+                                const int16Array = new Int16Array(inputData.length);
+                                for (let i = 0; i < inputData.length; i++) {
+                                    const sample = Math.max(-1.0, Math.min(1.0, inputData[i] * 0.95));
+                                    int16Array[i] = Math.round(sample * 32767);
+                                }
+                                
+                                // Send to main thread
+                                this.port.postMessage(int16Array.buffer);
+                            }
+                            return true;
+                        }
+                    }
+                    registerProcessor('audio-capture-processor', AudioCaptureProcessor);
+                `;
+                
+                const blob = new Blob([workletCode], { type: 'application/javascript' });
+                const workletUrl = URL.createObjectURL(blob);
+                
+                await this.audioContext.audioWorklet.addModule(workletUrl);
+                
+                const workletNode = new AudioWorkletNode(this.audioContext, 'audio-capture-processor');
+                workletNode.port.onmessage = (event) => {
+                    if (this.isConnected && this.websocket.readyState === WebSocket.OPEN) {
+                        const base64Audio = btoa(String.fromCharCode(...new Uint8Array(event.data)));
+                        this.websocket.send(base64Audio);
+                    }
+                };
+                
+                source.connect(workletNode);
+                URL.revokeObjectURL(workletUrl);
+            }
+            
+            stopAudioCapture() {
+                if (this.audioContext) {
+                    this.audioContext.close();
+                    this.audioContext = null;
+                }
+                if (this.playbackAudioContext) {
+                    this.playbackAudioContext.close();
+                    this.playbackAudioContext = null;
+                }
+                this.isRecording = false;
+            }
+            
+            handleWebSocketMessage(data) {
+                try {
+                    const message = JSON.parse(data);
+                    
+                    if (message.event === 'media') {
+                        // Handle audio response
+                        this.playAudio(message.data);
+                    } else if (message.event === 'transcript') {
+                        // Handle transcript
+                        this.addMessage(message.role || 'assistant', message.content);
+                    } else if (message.event === 'stop') {
+                        // Handle stop/interruption
+                        console.log('Received stop signal');
+                    }
+                    
+                } catch (error) {
+                    console.error('Error parsing WebSocket message:', error);
+                }
+            }
+            
+            async playAudio(base64Audio) {
+                try {
+                    // Decode base64 to array buffer
+                    const binaryString = atob(base64Audio);
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    
+                    // Create audio context if needed (use 24kHz for Nova Sonic output)
+                    if (!this.playbackAudioContext) {
+                        this.playbackAudioContext = new AudioContext({ sampleRate: 24000 });
+                    }
+                    
+                    // Ensure audio context is running
+                    if (this.playbackAudioContext.state === 'suspended') {
+                        await this.playbackAudioContext.resume();
+                    }
+                    
+                    // Convert bytes to Int16Array (little-endian)
+                    const int16Array = new Int16Array(bytes.buffer);
+                    
+                    // Create audio buffer with correct sample rate (24kHz for Nova Sonic)
+                    const audioBuffer = this.playbackAudioContext.createBuffer(1, int16Array.length, 24000);
+                    const channelData = audioBuffer.getChannelData(0);
+                    
+                    // Convert int16 to float32 with proper normalization
+                    for (let i = 0; i < int16Array.length; i++) {
+                        // Normalize int16 (-32768 to 32767) to float32 (-1.0 to 1.0)
+                        channelData[i] = int16Array[i] / 32768.0;
+                    }
+                    
+                    // Create and configure audio source
+                    const source = this.playbackAudioContext.createBufferSource();
+                    source.buffer = audioBuffer;
+                    
+                    // Add a gain node to control volume and prevent clipping
+                    const gainNode = this.playbackAudioContext.createGain();
+                    gainNode.gain.value = 0.8; // Reduce volume slightly to prevent distortion
+                    
+                    // Connect: source -> gain -> destination
+                    source.connect(gainNode);
+                    gainNode.connect(this.playbackAudioContext.destination);
+                    
+                    // Play the audio
+                    source.start();
+                    
+                    console.log(`Playing audio: ${int16Array.length} samples at 24kHz`);
+                    
+                } catch (error) {
+                    console.error('Error playing audio:', error);
+                }
+            }
+            
+            addMessage(role, content) {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${role}-message`;
+                
+                const timestamp = new Date().toLocaleTimeString();
+                messageDiv.innerHTML = `
+                    <strong>${role.charAt(0).toUpperCase() + role.slice(1)}:</strong> ${content}
+                    <small style="float: right; color: #666;">${timestamp}</small>
+                `;
+                
+                this.messages.appendChild(messageDiv);
+                this.messages.scrollTop = this.messages.scrollHeight;
+            }
+            
+            updateStatus(text, className) {
+                this.status.textContent = text;
+                this.status.className = `status ${className}`;
+            }
+        }
+        
+        // Initialize the client when the page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            new PipeCatClient();
+        });
+    </script>
+</body>
+</html>

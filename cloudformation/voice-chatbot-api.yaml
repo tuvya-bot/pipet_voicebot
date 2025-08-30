@@ -1,0 +1,475 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Voice Chatbot API Gateway WebSocket and HTTP APIs'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+  
+  ProjectName:
+    Type: String
+    Default: voice-chatbot
+    Description: Project name for resource naming
+
+Mappings:
+  EnvironmentMap:
+    dev:
+      ThrottleBurstLimit: 500
+      ThrottleRateLimit: 200
+      LogLevel: INFO
+    staging:
+      ThrottleBurstLimit: 1000
+      ThrottleRateLimit: 500
+      LogLevel: WARN
+    prod:
+      ThrottleBurstLimit: 2000
+      ThrottleRateLimit: 1000
+      LogLevel: ERROR
+
+Resources:
+  # ============================================================================
+  # WEBSOCKET API GATEWAY
+  # ============================================================================
+  
+  WebSocketApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${ProjectName}-websocket-api-${Environment}'
+      Description: WebSocket API for real-time voice chatbot
+      ProtocolType: WEBSOCKET
+      RouteSelectionExpression: $request.body.action
+      Tags:
+        Name: !Sub '${ProjectName}-websocket-api-${Environment}'
+        Environment: !Ref Environment
+
+  # WebSocket Routes
+  ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $connect
+      Target: !Sub 'integrations/${ConnectIntegration}'
+      AuthorizationType: NONE
+
+  DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $disconnect
+      Target: !Sub 'integrations/${DisconnectIntegration}'
+
+  AudioStreamRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: audiostream
+      Target: !Sub 'integrations/${AudioStreamIntegration}'
+
+  DefaultRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref WebSocketApi
+      RouteKey: $default
+      Target: !Sub 'integrations/${DefaultIntegration}'
+
+  # WebSocket Integrations
+  ConnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 
+        - 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations'
+        - FunctionArn: !ImportValue 
+            Fn::Sub: '${ProjectName}-session-manager-arn-${Environment}'
+
+  DisconnectIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 
+        - 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations'
+        - FunctionArn: !ImportValue 
+            Fn::Sub: '${ProjectName}-session-manager-arn-${Environment}'
+
+  AudioStreamIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 
+        - 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations'
+        - FunctionArn: !ImportValue 
+            Fn::Sub: '${ProjectName}-audio-processor-arn-${Environment}'
+
+  DefaultIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref WebSocketApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 
+        - 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations'
+        - FunctionArn: !ImportValue 
+            Fn::Sub: '${ProjectName}-session-manager-arn-${Environment}'
+
+  # Lambda Permissions for WebSocket API
+  ConnectLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !ImportValue 
+        Fn::Sub: '${ProjectName}-session-manager-arn-${Environment}'
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+
+  AudioStreamLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !ImportValue 
+        Fn::Sub: '${ProjectName}-audio-processor-arn-${Environment}'
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${WebSocketApi}/*'
+
+  # WebSocket Deployment and Stage
+  WebSocketDeployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn:
+      - ConnectRoute
+      - DisconnectRoute
+      - AudioStreamRoute
+      - DefaultRoute
+    Properties:
+      ApiId: !Ref WebSocketApi
+      Description: !Sub 'WebSocket API deployment for ${Environment}'
+
+  WebSocketStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref WebSocketApi
+      DeploymentId: !Ref WebSocketDeployment
+      StageName: !Ref Environment
+      Description: !Sub 'WebSocket API stage for ${Environment}'
+      ThrottleSettings:
+        BurstLimit: !FindInMap [EnvironmentMap, !Ref Environment, ThrottleBurstLimit]
+        RateLimit: !FindInMap [EnvironmentMap, !Ref Environment, ThrottleRateLimit]
+      DefaultRouteSettings:
+        LoggingLevel: !FindInMap [EnvironmentMap, !Ref Environment, LogLevel]
+        DataTraceEnabled: true
+        DetailedMetricsEnabled: true
+        ThrottlingBurstLimit: !FindInMap [EnvironmentMap, !Ref Environment, ThrottleBurstLimit]
+        ThrottlingRateLimit: !FindInMap [EnvironmentMap, !Ref Environment, ThrottleRateLimit]
+      Tags:
+        Name: !Sub '${ProjectName}-websocket-stage-${Environment}'
+        Environment: !Ref Environment
+
+  # ============================================================================
+  # HTTP API GATEWAY FOR REST ENDPOINTS
+  # ============================================================================
+  
+  HttpApi:
+    Type: AWS::ApiGatewayV2::Api
+    Properties:
+      Name: !Sub '${ProjectName}-http-api-${Environment}'
+      Description: HTTP API for voice chatbot management
+      ProtocolType: HTTP
+      CorsConfiguration:
+        AllowOrigins:
+          - '*'
+        AllowMethods:
+          - GET
+          - POST
+          - PUT
+          - DELETE
+          - OPTIONS
+        AllowHeaders:
+          - Content-Type
+          - Authorization
+          - X-Amz-Date
+          - X-Api-Key
+          - X-Amz-Security-Token
+        MaxAge: 86400
+      Tags:
+        Name: !Sub '${ProjectName}-http-api-${Environment}'
+        Environment: !Ref Environment
+
+  # HTTP Routes
+  HealthRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'GET /health'
+      Target: !Sub 'integrations/${HealthIntegration}'
+
+  RAGQueryRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'POST /rag/query'
+      Target: !Sub 'integrations/${RAGQueryIntegration}'
+
+  KnowledgeBaseRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref HttpApi
+      RouteKey: 'POST /knowledge-base'
+      Target: !Sub 'integrations/${KnowledgeBaseIntegration}'
+
+  # HTTP Integrations
+  HealthIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 
+        - 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations'
+        - FunctionArn: !Ref HealthFunction
+      PayloadFormatVersion: '2.0'
+
+  RAGQueryIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 
+        - 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations'
+        - FunctionArn: !ImportValue 
+            Fn::Sub: '${ProjectName}-rag-processor-arn-${Environment}'
+      PayloadFormatVersion: '2.0'
+
+  KnowledgeBaseIntegration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref HttpApi
+      IntegrationType: AWS_PROXY
+      IntegrationUri: !Sub 
+        - 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${FunctionArn}/invocations'
+        - FunctionArn: !Ref KnowledgeBaseManagerFunction
+      PayloadFormatVersion: '2.0'
+
+  # Additional Lambda Functions for HTTP API
+  HealthFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-health-${Environment}'
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !ImportValue 
+        Fn::Sub: '${ProjectName}-lambda-role-arn-${Environment}'
+      Code:
+        ZipFile: |
+          import json
+          from datetime import datetime
+          
+          def lambda_handler(event, context):
+              return {
+                  'statusCode': 200,
+                  'headers': {
+                      'Content-Type': 'application/json',
+                      'Access-Control-Allow-Origin': '*'
+                  },
+                  'body': json.dumps({
+                      'status': 'healthy',
+                      'service': 'voice-chatbot-api',
+                      'timestamp': datetime.now().isoformat(),
+                      'version': '1.0.0'
+                  })
+              }
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-health-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+  KnowledgeBaseManagerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-kb-manager-${Environment}'
+      Runtime: python3.11
+      Handler: index.lambda_handler
+      Role: !ImportValue 
+        Fn::Sub: '${ProjectName}-lambda-role-arn-${Environment}'
+      MemorySize: 512
+      Timeout: 30
+      Environment:
+        Variables:
+          KNOWLEDGE_BASE_TABLE_NAME: !ImportValue 
+            Fn::Sub: '${ProjectName}-kb-table-name-${Environment}'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          import hashlib
+          
+          def lambda_handler(event, context):
+              try:
+                  dynamodb = boto3.resource('dynamodb')
+                  kb_table = dynamodb.Table(os.environ['KNOWLEDGE_BASE_TABLE_NAME'])
+                  
+                  http_method = event.get('requestContext', {}).get('http', {}).get('method')
+                  
+                  if http_method == 'POST':
+                      return add_knowledge_item(kb_table, event)
+                  elif http_method == 'GET':
+                      return get_knowledge_items(kb_table, event)
+                  else:
+                      return {
+                          'statusCode': 405,
+                          'body': json.dumps({'error': 'Method not allowed'})
+                      }
+                      
+              except Exception as e:
+                  return {
+                      'statusCode': 500,
+                      'body': json.dumps({'error': str(e)})
+                  }
+          
+          def add_knowledge_item(kb_table, event):
+              body = json.loads(event.get('body', '{}'))
+              
+              required_fields = ['category', 'title', 'content']
+              if not all(field in body for field in required_fields):
+                  return {
+                      'statusCode': 400,
+                      'body': json.dumps({'error': 'Missing required fields'})
+                  }
+              
+              chunk_id = hashlib.md5(body['content'].encode()).hexdigest()[:12]
+              
+              kb_table.put_item(Item={
+                  'chunk_id': chunk_id,
+                  'category': body['category'],
+                  'title': body['title'],
+                  'content': body['content'],
+                  'source': body.get('source', ''),
+                  'confidence': body.get('confidence', 1.0),
+                  'last_updated': datetime.now().isoformat()
+              })
+              
+              return {
+                  'statusCode': 201,
+                  'headers': {'Access-Control-Allow-Origin': '*'},
+                  'body': json.dumps({
+                      'message': 'Knowledge item added successfully',
+                      'chunk_id': chunk_id
+                  })
+              }
+          
+          def get_knowledge_items(kb_table, event):
+              response = kb_table.scan()
+              items = response.get('Items', [])
+              
+              return {
+                  'statusCode': 200,
+                  'headers': {'Access-Control-Allow-Origin': '*'},
+                  'body': json.dumps({
+                      'items': items,
+                      'count': len(items)
+                  })
+              }
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-kb-manager-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # Lambda Permissions for HTTP API
+  HealthLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref HealthFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*'
+
+  RAGQueryLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !ImportValue 
+        Fn::Sub: '${ProjectName}-rag-processor-arn-${Environment}'
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*'
+
+  KnowledgeBaseLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref KnowledgeBaseManagerFunction
+      Action: lambda:InvokeFunction
+      Principal: apigateway.amazonaws.com
+      SourceArn: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${HttpApi}/*'
+
+  # HTTP Deployment and Stage
+  HttpDeployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn:
+      - HealthRoute
+      - RAGQueryRoute
+      - KnowledgeBaseRoute
+    Properties:
+      ApiId: !Ref HttpApi
+      Description: !Sub 'HTTP API deployment for ${Environment}'
+
+  HttpStage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      ApiId: !Ref HttpApi
+      DeploymentId: !Ref HttpDeployment
+      StageName: !Ref Environment
+      Description: !Sub 'HTTP API stage for ${Environment}'
+      ThrottleSettings:
+        BurstLimit: !FindInMap [EnvironmentMap, !Ref Environment, ThrottleBurstLimit]
+        RateLimit: !FindInMap [EnvironmentMap, !Ref Environment, ThrottleRateLimit]
+      DefaultRouteSettings:
+        DetailedMetricsEnabled: true
+        ThrottlingBurstLimit: !FindInMap [EnvironmentMap, !Ref Environment, ThrottleBurstLimit]
+        ThrottlingRateLimit: !FindInMap [EnvironmentMap, !Ref Environment, ThrottleRateLimit]
+      Tags:
+        Name: !Sub '${ProjectName}-http-stage-${Environment}'
+        Environment: !Ref Environment
+
+  # ============================================================================
+  # CLOUDWATCH LOG GROUPS
+  # ============================================================================
+  
+  WebSocketApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/apigateway/${ProjectName}-websocket-${Environment}'
+      RetentionInDays: 14
+
+  HttpApiLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/apigateway/${ProjectName}-http-${Environment}'
+      RetentionInDays: 14
+
+Outputs:
+  WebSocketApiEndpoint:
+    Description: WebSocket API Gateway endpoint URL
+    Value: !Sub 'wss://${WebSocketApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${ProjectName}-websocket-endpoint-${Environment}'
+
+  HttpApiEndpoint:
+    Description: HTTP API Gateway endpoint URL
+    Value: !Sub 'https://${HttpApi}.execute-api.${AWS::Region}.amazonaws.com/${Environment}'
+    Export:
+      Name: !Sub '${ProjectName}-http-endpoint-${Environment}'
+
+  WebSocketApiId:
+    Description: WebSocket API Gateway ID
+    Value: !Ref WebSocketApi
+    Export:
+      Name: !Sub '${ProjectName}-websocket-api-id-${Environment}'
+
+  HttpApiId:
+    Description: HTTP API Gateway ID
+    Value: !Ref HttpApi
+    Export:
+      Name: !Sub '${ProjectName}-http-api-id-${Environment}'

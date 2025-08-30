@@ -1,0 +1,58 @@
+{
+  "name": "sow-editor",
+  "version": "1.0.0",
+  "description": "AI-powered Statement of Work Editor with Claude integration",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "react-scripts start",
+    "build": "react-scripts build",
+    "test": "react-scripts test",
+    "eject": "react-scripts eject",
+    "dev": "concurrently \"npm start\" \"npm run server\"",
+    "server": "node server/index.js"
+  },
+  "dependencies": {
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-scripts": "5.0.1",
+    "slate": "^0.101.5",
+    "slate-react": "^0.102.0",
+    "slate-history": "^0.100.0",
+    "zustand": "^4.4.1",
+    "immer": "^10.0.2",
+    "react-markdown": "^8.0.7",
+    "docx": "^8.2.2",
+    "react-pdf": "^7.3.3",
+    "pdf-lib": "^1.17.1",
+    "@aws-sdk/client-bedrock-runtime": "^3.400.0",
+    "@aws-sdk/client-s3": "^3.400.0",
+    "@aws-sdk/client-dynamodb": "^3.400.0",
+    "@aws-sdk/client-cognito-identity-provider": "^3.400.0",
+    "aws-amplify": "^5.3.11",
+    "socket.io-client": "^4.7.2",
+    "react-resizable-panels": "^0.0.55",
+    "lucide-react": "^0.263.1",
+    "tailwindcss": "^3.3.3",
+    "autoprefixer": "^10.4.14",
+    "postcss": "^8.4.27"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.0",
+    "express": "^4.18.2",
+    "socket.io": "^4.7.2",
+    "cors": "^2.8.5",
+    "dotenv": "^16.3.1"
+  },
+  "browserslist": {
+    "production": [
+      ">0.2%",
+      "not dead",
+      "not op_mini all"
+    ],
+    "development": [
+      "last 1 chrome version",
+      "last 1 firefox version",
+      "last 1 safari version"
+    ]
+  }
+}

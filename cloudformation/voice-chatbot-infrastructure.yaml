@@ -1,0 +1,316 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Voice Chatbot Infrastructure with Real-time Speech-to-Speech and RAG capabilities'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+  
+  ProjectName:
+    Type: String
+    Default: voice-chatbot
+    Description: Project name for resource naming
+  
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR block for VPC
+  
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: 10.0.1.0/24
+    Description: CIDR block for private subnet 1
+  
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: 10.0.2.0/24
+    Description: CIDR block for private subnet 2
+
+Mappings:
+  EnvironmentMap:
+    dev:
+      DAXNodeType: dax.t3.small
+      LambdaMemorySize: 1024
+      DynamoDBBillingMode: PAY_PER_REQUEST
+    staging:
+      DAXNodeType: dax.r4.large
+      LambdaMemorySize: 2048
+      DynamoDBBillingMode: PAY_PER_REQUEST
+    prod:
+      DAXNodeType: dax.r4.xlarge
+      LambdaMemorySize: 3008
+      DynamoDBBillingMode: PROVISIONED
+
+Resources:
+  # ============================================================================
+  # NETWORKING INFRASTRUCTURE
+  # ============================================================================
+  
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-vpc-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-subnet-1-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-private-subnet-2-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================================
+  # SECURITY GROUPS
+  # ============================================================================
+  
+  DAXSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for DAX cluster
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8111
+          ToPort: 8111
+          SourceSecurityGroupId: !Ref LambdaSecurityGroup
+          Description: DAX port access from Lambda
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-dax-sg-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+  LambdaSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Lambda functions
+      VpcId: !Ref VPC
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: All outbound traffic
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-lambda-sg-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================================
+  # DYNAMODB TABLES
+  # ============================================================================
+  
+  SessionTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-sessions-${Environment}'
+      BillingMode: !FindInMap [EnvironmentMap, !Ref Environment, DynamoDBBillingMode]
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+        - AttributeName: user_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: N
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: user-id-index
+          KeySchema:
+            - AttributeName: user_id
+              KeyType: HASH
+            - AttributeName: timestamp
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-sessions-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+  KnowledgeBaseTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-knowledge-base-${Environment}'
+      BillingMode: !FindInMap [EnvironmentMap, !Ref Environment, DynamoDBBillingMode]
+      AttributeDefinitions:
+        - AttributeName: chunk_id
+          AttributeType: S
+        - AttributeName: category
+          AttributeType: S
+        - AttributeName: embedding_hash
+          AttributeType: S
+      KeySchema:
+        - AttributeName: chunk_id
+          KeyType: HASH
+        - AttributeName: category
+          KeyType: RANGE
+      GlobalSecondaryIndexes:
+        - IndexName: category-index
+          KeySchema:
+            - AttributeName: category
+              KeyType: HASH
+            - AttributeName: embedding_hash
+              KeyType: RANGE
+          Projection:
+            ProjectionType: ALL
+      PointInTimeRecoverySpecification:
+        PointInTimeRecoveryEnabled: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-knowledge-base-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+  ConversationHistoryTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub '${ProjectName}-conversation-history-${Environment}'
+      BillingMode: !FindInMap [EnvironmentMap, !Ref Environment, DynamoDBBillingMode]
+      AttributeDefinitions:
+        - AttributeName: session_id
+          AttributeType: S
+        - AttributeName: message_timestamp
+          AttributeType: N
+      KeySchema:
+        - AttributeName: session_id
+          KeyType: HASH
+        - AttributeName: message_timestamp
+          KeyType: RANGE
+      TimeToLiveSpecification:
+        AttributeName: ttl
+        Enabled: true
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-conversation-history-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+  # ============================================================================
+  # DAX CLUSTER FOR SUB-MILLISECOND CACHING
+  # ============================================================================
+  
+  DAXSubnetGroup:
+    Type: AWS::DAX::SubnetGroup
+    Properties:
+      SubnetGroupName: !Sub '${ProjectName}-dax-subnet-group-${Environment}'
+      Description: Subnet group for DAX cluster
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  DAXServiceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-dax-service-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: dax.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonDynamoDBFullAccess
+
+  DAXCluster:
+    Type: AWS::DAX::Cluster
+    Properties:
+      ClusterName: !Sub '${ProjectName}-dax-cluster-${Environment}'
+      Description: DAX cluster for voice chatbot caching
+      NodeType: !FindInMap [EnvironmentMap, !Ref Environment, DAXNodeType]
+      ReplicationFactor: 2
+      IAMRoleARN: !GetAtt DAXServiceRole.Arn
+      SubnetGroupName: !Ref DAXSubnetGroup
+      SecurityGroupIds:
+        - !Ref DAXSecurityGroup
+      ParameterGroupName: default.dax1.0
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-dax-cluster-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+    Export:
+      Name: !Sub '${ProjectName}-vpc-id-${Environment}'
+
+  PrivateSubnet1Id:
+    Description: Private Subnet 1 ID
+    Value: !Ref PrivateSubnet1
+    Export:
+      Name: !Sub '${ProjectName}-private-subnet-1-id-${Environment}'
+
+  PrivateSubnet2Id:
+    Description: Private Subnet 2 ID
+    Value: !Ref PrivateSubnet2
+    Export:
+      Name: !Sub '${ProjectName}-private-subnet-2-id-${Environment}'
+
+  LambdaSecurityGroupId:
+    Description: Lambda Security Group ID
+    Value: !Ref LambdaSecurityGroup
+    Export:
+      Name: !Sub '${ProjectName}-lambda-sg-id-${Environment}'
+
+  SessionTableName:
+    Description: Session DynamoDB Table Name
+    Value: !Ref SessionTable
+    Export:
+      Name: !Sub '${ProjectName}-session-table-name-${Environment}'
+
+  KnowledgeBaseTableName:
+    Description: Knowledge Base DynamoDB Table Name
+    Value: !Ref KnowledgeBaseTable
+    Export:
+      Name: !Sub '${ProjectName}-kb-table-name-${Environment}'
+
+  ConversationHistoryTableName:
+    Description: Conversation History DynamoDB Table Name
+    Value: !Ref ConversationHistoryTable
+    Export:
+      Name: !Sub '${ProjectName}-conversation-table-name-${Environment}'
+
+  DAXClusterEndpoint:
+    Description: DAX Cluster Endpoint
+    Value: !GetAtt DAXCluster.ClusterDiscoveryEndpoint
+    Export:
+      Name: !Sub '${ProjectName}-dax-endpoint-${Environment}'

@@ -1,0 +1,504 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Voice Chatbot Compute Resources - Lambda Functions and API Gateway'
+
+Parameters:
+  Environment:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+    Description: Environment name
+  
+  ProjectName:
+    Type: String
+    Default: voice-chatbot
+    Description: Project name for resource naming
+
+Mappings:
+  EnvironmentMap:
+    dev:
+      LambdaMemorySize: 1024
+      LambdaTimeout: 300
+      APIGatewayThrottleBurstLimit: 500
+      APIGatewayThrottleRateLimit: 200
+    staging:
+      LambdaMemorySize: 2048
+      LambdaTimeout: 300
+      APIGatewayThrottleBurstLimit: 1000
+      APIGatewayThrottleRateLimit: 500
+    prod:
+      LambdaMemorySize: 3008
+      LambdaTimeout: 300
+      APIGatewayThrottleBurstLimit: 2000
+      APIGatewayThrottleRateLimit: 1000
+
+Resources:
+  # ============================================================================
+  # IAM ROLES AND POLICIES
+  # ============================================================================
+  
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub '${ProjectName}-lambda-execution-role-${Environment}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaVPCAccessExecutionRole
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: VoiceChatbotLambdaPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:GetItem
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                  - dynamodb:DeleteItem
+                  - dynamodb:Query
+                  - dynamodb:Scan
+                  - dynamodb:BatchGetItem
+                  - dynamodb:BatchWriteItem
+                Resource:
+                  - !Sub 
+                    - '${TableArn}'
+                    - TableArn: !ImportValue 
+                        Fn::Sub: '${ProjectName}-session-table-name-${Environment}'
+                  - !Sub 
+                    - '${TableArn}/index/*'
+                    - TableArn: !ImportValue 
+                        Fn::Sub: '${ProjectName}-session-table-name-${Environment}'
+                  - !Sub 
+                    - '${TableArn}'
+                    - TableArn: !ImportValue 
+                        Fn::Sub: '${ProjectName}-kb-table-name-${Environment}'
+                  - !Sub 
+                    - '${TableArn}/index/*'
+                    - TableArn: !ImportValue 
+                        Fn::Sub: '${ProjectName}-kb-table-name-${Environment}'
+                  - !Sub 
+                    - '${TableArn}'
+                    - TableArn: !ImportValue 
+                        Fn::Sub: '${ProjectName}-conversation-table-name-${Environment}'
+              - Effect: Allow
+                Action:
+                  - dax:GetItem
+                  - dax:PutItem
+                  - dax:UpdateItem
+                  - dax:DeleteItem
+                  - dax:Query
+                  - dax:Scan
+                  - dax:BatchGetItem
+                  - dax:BatchWriteItem
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - bedrock:InvokeModel
+                  - bedrock:InvokeModelWithResponseStream
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - execute-api:ManageConnections
+                Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:*'
+
+  # ============================================================================
+  # LAMBDA FUNCTIONS
+  # ============================================================================
+  
+  SessionManagerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-session-manager-${Environment}'
+      Runtime: python3.11
+      Handler: session_manager.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: !FindInMap [EnvironmentMap, !Ref Environment, LambdaMemorySize]
+      Timeout: !FindInMap [EnvironmentMap, !Ref Environment, LambdaTimeout]
+      VpcConfig:
+        SecurityGroupIds:
+          - !ImportValue 
+              Fn::Sub: '${ProjectName}-lambda-sg-id-${Environment}'
+        SubnetIds:
+          - !ImportValue 
+              Fn::Sub: '${ProjectName}-private-subnet-1-id-${Environment}'
+          - !ImportValue 
+              Fn::Sub: '${ProjectName}-private-subnet-2-id-${Environment}'
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          PROJECT_NAME: !Ref ProjectName
+          SESSION_TABLE_NAME: !ImportValue 
+            Fn::Sub: '${ProjectName}-session-table-name-${Environment}'
+          KNOWLEDGE_BASE_TABLE_NAME: !ImportValue 
+            Fn::Sub: '${ProjectName}-kb-table-name-${Environment}'
+          CONVERSATION_TABLE_NAME: !ImportValue 
+            Fn::Sub: '${ProjectName}-conversation-table-name-${Environment}'
+          DAX_ENDPOINT: !ImportValue 
+            Fn::Sub: '${ProjectName}-dax-endpoint-${Environment}'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime, timedelta
+          import uuid
+          
+          def lambda_handler(event, context):
+              """Session management for voice chatbot"""
+              try:
+                  # Initialize clients
+                  dynamodb = boto3.resource('dynamodb')
+                  session_table = dynamodb.Table(os.environ['SESSION_TABLE_NAME'])
+                  
+                  # Extract request details
+                  route_key = event.get('requestContext', {}).get('routeKey')
+                  connection_id = event.get('requestContext', {}).get('connectionId')
+                  
+                  if route_key == '$connect':
+                      return handle_connect(session_table, connection_id)
+                  elif route_key == '$disconnect':
+                      return handle_disconnect(session_table, connection_id)
+                  else:
+                      return handle_message(session_table, connection_id, event)
+                      
+              except Exception as e:
+                  print(f"Error in session manager: {str(e)}")
+                  return {'statusCode': 500, 'body': json.dumps({'error': str(e)})}
+          
+          def handle_connect(session_table, connection_id):
+              """Handle new WebSocket connection"""
+              session_id = str(uuid.uuid4())
+              timestamp = int(datetime.now().timestamp())
+              ttl = int((datetime.now() + timedelta(hours=24)).timestamp())
+              
+              session_table.put_item(Item={
+                  'session_id': session_id,
+                  'timestamp': timestamp,
+                  'connection_id': connection_id,
+                  'status': 'connected',
+                  'ttl': ttl
+              })
+              
+              return {'statusCode': 200}
+          
+          def handle_disconnect(session_table, connection_id):
+              """Handle WebSocket disconnection"""
+              # Update session status
+              response = session_table.scan(
+                  FilterExpression='connection_id = :conn_id',
+                  ExpressionAttributeValues={':conn_id': connection_id}
+              )
+              
+              for item in response.get('Items', []):
+                  session_table.update_item(
+                      Key={
+                          'session_id': item['session_id'],
+                          'timestamp': item['timestamp']
+                      },
+                      UpdateExpression='SET #status = :status',
+                      ExpressionAttributeNames={'#status': 'status'},
+                      ExpressionAttributeValues={':status': 'disconnected'}
+                  )
+              
+              return {'statusCode': 200}
+          
+          def handle_message(session_table, connection_id, event):
+              """Handle WebSocket message"""
+              body = json.loads(event.get('body', '{}'))
+              action = body.get('action', 'unknown')
+              
+              # Log message for processing
+              print(f"Received action: {action} from connection: {connection_id}")
+              
+              return {'statusCode': 200}
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-session-manager-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+  AudioProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-audio-processor-${Environment}'
+      Runtime: python3.11
+      Handler: audio_processor.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: !FindInMap [EnvironmentMap, !Ref Environment, LambdaMemorySize]
+      Timeout: !FindInMap [EnvironmentMap, !Ref Environment, LambdaTimeout]
+      VpcConfig:
+        SecurityGroupIds:
+          - !ImportValue 
+              Fn::Sub: '${ProjectName}-lambda-sg-id-${Environment}'
+        SubnetIds:
+          - !ImportValue 
+              Fn::Sub: '${ProjectName}-private-subnet-1-id-${Environment}'
+          - !ImportValue 
+              Fn::Sub: '${ProjectName}-private-subnet-2-id-${Environment}'
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          PROJECT_NAME: !Ref ProjectName
+          SESSION_TABLE_NAME: !ImportValue 
+            Fn::Sub: '${ProjectName}-session-table-name-${Environment}'
+          KNOWLEDGE_BASE_TABLE_NAME: !ImportValue 
+            Fn::Sub: '${ProjectName}-kb-table-name-${Environment}'
+          CONVERSATION_TABLE_NAME: !ImportValue 
+            Fn::Sub: '${ProjectName}-conversation-table-name-${Environment}'
+          DAX_ENDPOINT: !ImportValue 
+            Fn::Sub: '${ProjectName}-dax-endpoint-${Environment}'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          import base64
+          from datetime import datetime
+          
+          def lambda_handler(event, context):
+              """Process audio streams and coordinate with Nova Sonic"""
+              try:
+                  # Initialize clients
+                  bedrock = boto3.client('bedrock-runtime')
+                  dynamodb = boto3.resource('dynamodb')
+                  
+                  # Extract audio data
+                  body = json.loads(event.get('body', '{}'))
+                  audio_data = body.get('audioData', '')
+                  connection_id = event.get('requestContext', {}).get('connectionId')
+                  
+                  # Process audio with Nova Sonic
+                  response = process_with_nova_sonic(bedrock, audio_data)
+                  
+                  # Store conversation history
+                  store_conversation(dynamodb, connection_id, body.get('transcript', ''), response)
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'response': response,
+                          'timestamp': datetime.now().isoformat()
+                      })
+                  }
+                  
+              except Exception as e:
+                  print(f"Error in audio processor: {str(e)}")
+                  return {'statusCode': 500, 'body': json.dumps({'error': str(e)})}
+          
+          def process_with_nova_sonic(bedrock_client, audio_data):
+              """Process audio with AWS Nova Sonic"""
+              try:
+                  # Decode base64 audio
+                  audio_bytes = base64.b64decode(audio_data)
+                  
+                  # Call Nova Sonic (placeholder - actual implementation would use the real API)
+                  response = {
+                      'text': 'Hello! How can I help you today?',
+                      'audio': base64.b64encode(b'placeholder_audio').decode('utf-8')
+                  }
+                  
+                  return response
+                  
+              except Exception as e:
+                  print(f"Error processing with Nova Sonic: {str(e)}")
+                  return {'text': 'I apologize, but I encountered an error processing your request.'}
+          
+          def store_conversation(dynamodb, connection_id, user_message, bot_response):
+              """Store conversation in DynamoDB"""
+              try:
+                  conversation_table = dynamodb.Table(os.environ['CONVERSATION_TABLE_NAME'])
+                  timestamp = int(datetime.now().timestamp() * 1000)  # milliseconds
+                  
+                  # Store user message
+                  if user_message:
+                      conversation_table.put_item(Item={
+                          'session_id': connection_id,
+                          'message_timestamp': timestamp,
+                          'role': 'user',
+                          'content': user_message,
+                          'ttl': int((datetime.now().timestamp() + 86400 * 7))  # 7 days TTL
+                      })
+                  
+                  # Store bot response
+                  conversation_table.put_item(Item={
+                      'session_id': connection_id,
+                      'message_timestamp': timestamp + 1,
+                      'role': 'assistant',
+                      'content': bot_response.get('text', ''),
+                      'ttl': int((datetime.now().timestamp() + 86400 * 7))  # 7 days TTL
+                  })
+                  
+              except Exception as e:
+                  print(f"Error storing conversation: {str(e)}")
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-audio-processor-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+  RAGProcessorFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub '${ProjectName}-rag-processor-${Environment}'
+      Runtime: python3.11
+      Handler: rag_processor.lambda_handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: !FindInMap [EnvironmentMap, !Ref Environment, LambdaMemorySize]
+      Timeout: !FindInMap [EnvironmentMap, !Ref Environment, LambdaTimeout]
+      VpcConfig:
+        SecurityGroupIds:
+          - !ImportValue 
+              Fn::Sub: '${ProjectName}-lambda-sg-id-${Environment}'
+        SubnetIds:
+          - !ImportValue 
+              Fn::Sub: '${ProjectName}-private-subnet-1-id-${Environment}'
+          - !ImportValue 
+              Fn::Sub: '${ProjectName}-private-subnet-2-id-${Environment}'
+      Environment:
+        Variables:
+          ENVIRONMENT: !Ref Environment
+          PROJECT_NAME: !Ref ProjectName
+          KNOWLEDGE_BASE_TABLE_NAME: !ImportValue 
+            Fn::Sub: '${ProjectName}-kb-table-name-${Environment}'
+          DAX_ENDPOINT: !ImportValue 
+            Fn::Sub: '${ProjectName}-dax-endpoint-${Environment}'
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+          from datetime import datetime
+          import hashlib
+          
+          def lambda_handler(event, context):
+              """RAG processing for knowledge retrieval"""
+              try:
+                  # Initialize clients
+                  dynamodb = boto3.resource('dynamodb')
+                  bedrock = boto3.client('bedrock-runtime')
+                  
+                  # Extract query
+                  body = json.loads(event.get('body', '{}'))
+                  query = body.get('query', '')
+                  
+                  if not query:
+                      return {
+                          'statusCode': 400,
+                          'body': json.dumps({'error': 'Query is required'})
+                      }
+                  
+                  # Retrieve relevant context
+                  context = retrieve_context(dynamodb, query)
+                  
+                  # Generate response with context
+                  response = generate_rag_response(bedrock, query, context)
+                  
+                  return {
+                      'statusCode': 200,
+                      'body': json.dumps({
+                          'response': response,
+                          'context_used': len(context),
+                          'timestamp': datetime.now().isoformat()
+                      })
+                  }
+                  
+              except Exception as e:
+                  print(f"Error in RAG processor: {str(e)}")
+                  return {'statusCode': 500, 'body': json.dumps({'error': str(e)})}
+          
+          def retrieve_context(dynamodb, query):
+              """Retrieve relevant context from knowledge base"""
+              try:
+                  kb_table = dynamodb.Table(os.environ['KNOWLEDGE_BASE_TABLE_NAME'])
+                  
+                  # Simple keyword-based retrieval (in production, use vector search)
+                  query_words = query.lower().split()
+                  
+                  # Scan for relevant documents
+                  response = kb_table.scan()
+                  items = response.get('Items', [])
+                  
+                  # Score items based on keyword matches
+                  scored_items = []
+                  for item in items:
+                      content = item.get('content', '').lower()
+                      title = item.get('title', '').lower()
+                      
+                      score = 0
+                      for word in query_words:
+                          if word in content:
+                              score += content.count(word)
+                          if word in title:
+                              score += title.count(word) * 2  # Title matches weighted higher
+                      
+                      if score > 0:
+                          scored_items.append((score, item))
+                  
+                  # Sort by score and return top 3
+                  scored_items.sort(key=lambda x: x[0], reverse=True)
+                  return [item[1] for item in scored_items[:3]]
+                  
+              except Exception as e:
+                  print(f"Error retrieving context: {str(e)}")
+                  return []
+          
+          def generate_rag_response(bedrock_client, query, context):
+              """Generate response using retrieved context"""
+              try:
+                  if not context:
+                      return "I don't have specific information about that. Let me connect you with a human agent."
+                  
+                  # Prepare context for prompt
+                  context_text = "\n\n".join([
+                      f"[{ctx.get('category', 'GENERAL').upper()}] {ctx.get('title', '')}\n{ctx.get('content', '')}"
+                      for ctx in context
+                  ])
+                  
+                  # Simple template-based response (in production, use Bedrock)
+                  best_context = context[0]
+                  category = best_context.get('category', 'general')
+                  content = best_context.get('content', '')
+                  
+                  response = f"Based on our {category} information: {content}"
+                  
+                  return response
+                  
+              except Exception as e:
+                  print(f"Error generating RAG response: {str(e)}")
+                  return "I apologize, but I'm having trouble accessing our knowledge base right now."
+      Tags:
+        - Key: Name
+          Value: !Sub '${ProjectName}-rag-processor-${Environment}'
+        - Key: Environment
+          Value: !Ref Environment
+
+Outputs:
+  SessionManagerFunctionArn:
+    Description: Session Manager Lambda Function ARN
+    Value: !GetAtt SessionManagerFunction.Arn
+    Export:
+      Name: !Sub '${ProjectName}-session-manager-arn-${Environment}'
+
+  AudioProcessorFunctionArn:
+    Description: Audio Processor Lambda Function ARN
+    Value: !GetAtt AudioProcessorFunction.Arn
+    Export:
+      Name: !Sub '${ProjectName}-audio-processor-arn-${Environment}'
+
+  RAGProcessorFunctionArn:
+    Description: RAG Processor Lambda Function ARN
+    Value: !GetAtt RAGProcessorFunction.Arn
+    Export:
+      Name: !Sub '${ProjectName}-rag-processor-arn-${Environment}'
+
+  LambdaExecutionRoleArn:
+    Description: Lambda Execution Role ARN
+    Value: !GetAtt LambdaExecutionRole.Arn
+    Export:
+      Name: !Sub '${ProjectName}-lambda-role-arn-${Environment}'

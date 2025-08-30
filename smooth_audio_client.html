@@ -1,0 +1,460 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Nova Sonic - Smooth Audio Client</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        .container {
+            background: white;
+            padding: 30px;
+            border-radius: 10px;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+        }
+        h1 {
+            color: #333;
+            text-align: center;
+        }
+        .controls {
+            display: flex;
+            gap: 10px;
+            margin: 20px 0;
+            justify-content: center;
+        }
+        button {
+            padding: 12px 24px;
+            font-size: 16px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        .start-btn {
+            background-color: #4CAF50;
+            color: white;
+        }
+        .stop-btn {
+            background-color: #f44336;
+            color: white;
+        }
+        .status {
+            text-align: center;
+            margin: 20px 0;
+            padding: 10px;
+            border-radius: 5px;
+            font-weight: bold;
+        }
+        .connected { background-color: #d4edda; color: #155724; }
+        .disconnected { background-color: #f8d7da; color: #721c24; }
+        .recording { background-color: #fff3cd; color: #856404; }
+        .log {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 5px;
+            padding: 15px;
+            margin-top: 20px;
+            max-height: 200px;
+            overflow-y: auto;
+            font-family: monospace;
+            font-size: 12px;
+        }
+        .audio-info {
+            background-color: #e8f5e8;
+            border: 1px solid #4CAF50;
+            border-radius: 5px;
+            padding: 15px;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🎤 Nova Sonic - Smooth Audio Client</h1>
+        
+        <div class="controls">
+            <button id="startBtn" class="start-btn">Connect & Start</button>
+            <button id="stopBtn" class="stop-btn" disabled>Stop & Disconnect</button>
+        </div>
+
+        <div id="status" class="status disconnected">Disconnected</div>
+        
+        <div class="audio-info">
+            <h3>Audio Status</h3>
+            <div id="audioStatus">Ready to connect</div>
+        </div>
+        
+        <div class="log">
+            <div id="logMessages"></div>
+        </div>
+    </div>
+
+    <script>
+        class SmoothAudioClient {
+            constructor() {
+                this.websocket = null;
+                this.audioContext = null;
+                this.playbackContext = null;
+                this.isRecording = false;
+                this.isConnected = false;
+                
+                // Audio buffering
+                this.audioQueue = [];
+                this.isPlaying = false;
+                this.nextPlayTime = 0;
+                this.audioBuffer = [];
+                this.bufferSize = 0;
+                this.maxBufferSize = 8192; // Buffer up to 8KB of audio
+                
+                this.startBtn = document.getElementById('startBtn');
+                this.stopBtn = document.getElementById('stopBtn');
+                this.status = document.getElementById('status');
+                this.logMessages = document.getElementById('logMessages');
+                this.audioStatus = document.getElementById('audioStatus');
+                
+                this.setupEventListeners();
+                this.log('Smooth audio client initialized');
+            }
+            
+            setupEventListeners() {
+                this.startBtn.addEventListener('click', () => this.start());
+                this.stopBtn.addEventListener('click', () => this.stop());
+            }
+            
+            log(message) {
+                const timestamp = new Date().toLocaleTimeString();
+                const logEntry = document.createElement('div');
+                logEntry.textContent = `[${timestamp}] ${message}`;
+                this.logMessages.appendChild(logEntry);
+                this.logMessages.scrollTop = this.logMessages.scrollHeight;
+                console.log(message);
+            }
+            
+            updateAudioStatus(message) {
+                this.audioStatus.textContent = message;
+            }
+            
+            async start() {
+                try {
+                    this.log('Starting connection...');
+                    await this.connectWebSocket();
+                    await this.startAudioCapture();
+                    
+                    this.startBtn.disabled = true;
+                    this.stopBtn.disabled = false;
+                    this.updateStatus('Connected & Recording', 'recording');
+                    this.updateAudioStatus('Connected - waiting for audio...');
+                    this.log('Successfully started');
+                    
+                } catch (error) {
+                    this.log(`Error: ${error.message}`);
+                    this.updateStatus('Connection Failed', 'disconnected');
+                }
+            }
+            
+            async stop() {
+                this.log('Stopping...');
+                this.stopAudioCapture();
+                this.disconnectWebSocket();
+                
+                // Clear audio buffers
+                this.audioQueue = [];
+                this.audioBuffer = [];
+                this.bufferSize = 0;
+                this.isPlaying = false;
+                
+                this.startBtn.disabled = false;
+                this.stopBtn.disabled = true;
+                this.updateStatus('Disconnected', 'disconnected');
+                this.updateAudioStatus('Disconnected');
+                this.log('Stopped');
+            }
+            
+            async connectWebSocket() {
+                return new Promise((resolve, reject) => {
+                    const url = 'ws://localhost:8000/ws';
+                    this.websocket = new WebSocket(url, ['nova-sonic-enhanced-api-key']);
+                    
+                    this.websocket.onopen = () => {
+                        this.log('WebSocket connected');
+                        this.isConnected = true;
+                        resolve();
+                    };
+                    
+                    this.websocket.onmessage = (event) => {
+                        this.handleWebSocketMessage(event.data);
+                    };
+                    
+                    this.websocket.onclose = () => {
+                        this.log('WebSocket disconnected');
+                        this.isConnected = false;
+                        this.updateStatus('Disconnected', 'disconnected');
+                    };
+                    
+                    this.websocket.onerror = (error) => {
+                        this.log('WebSocket error');
+                        reject(new Error('WebSocket connection failed'));
+                    };
+                    
+                    setTimeout(() => {
+                        if (!this.isConnected) {
+                            reject(new Error('Connection timeout'));
+                        }
+                    }, 5000);
+                });
+            }
+            
+            disconnectWebSocket() {
+                if (this.websocket) {
+                    this.websocket.close();
+                    this.websocket = null;
+                }
+                this.isConnected = false;
+            }
+            
+            async startAudioCapture() {
+                try {
+                    this.log('Requesting microphone access...');
+                    const stream = await navigator.mediaDevices.getUserMedia({ 
+                        audio: {
+                            sampleRate: 16000,
+                            channelCount: 1,
+                            echoCancellation: true,
+                            noiseSuppression: true,
+                            autoGainControl: true
+                        } 
+                    });
+                    
+                    this.log('Microphone access granted');
+                    
+                    // Create audio context
+                    this.audioContext = new AudioContext({ sampleRate: 16000 });
+                    const source = this.audioContext.createMediaStreamSource(stream);
+                    
+                    // Create processor
+                    const processor = this.audioContext.createScriptProcessor(1024, 1, 1);
+                    
+                    processor.onaudioprocess = (event) => {
+                        if (this.isConnected && this.websocket.readyState === WebSocket.OPEN) {
+                            const inputBuffer = event.inputBuffer;
+                            const inputData = inputBuffer.getChannelData(0);
+                            
+                            // Convert float32 to int16
+                            const int16Array = new Int16Array(inputData.length);
+                            for (let i = 0; i < inputData.length; i++) {
+                                const sample = Math.max(-1, Math.min(1, inputData[i]));
+                                int16Array[i] = Math.round(sample * 32767);
+                            }
+                            
+                            // Convert to base64 and send
+                            const base64Audio = btoa(String.fromCharCode(...new Uint8Array(int16Array.buffer)));
+                            this.websocket.send(base64Audio);
+                        }
+                    };
+                    
+                    source.connect(processor);
+                    processor.connect(this.audioContext.destination);
+                    
+                    this.isRecording = true;
+                    this.log('Audio capture started');
+                    
+                } catch (error) {
+                    throw new Error(`Failed to access microphone: ${error.message}`);
+                }
+            }
+            
+            stopAudioCapture() {
+                if (this.audioContext) {
+                    this.audioContext.close();
+                    this.audioContext = null;
+                }
+                if (this.playbackContext) {
+                    this.playbackContext.close();
+                    this.playbackContext = null;
+                }
+                this.isRecording = false;
+                this.log('Audio capture stopped');
+            }
+            
+            handleWebSocketMessage(data) {
+                try {
+                    const message = JSON.parse(data);
+                    
+                    if (message.event === 'media') {
+                        const sampleRate = message.sample_rate || 16000;
+                        const channels = message.channels || 1;
+                        
+                        // Add to buffer instead of playing immediately
+                        this.bufferAudioData(message.data, sampleRate, channels);
+                        
+                    } else if (message.event === 'stop') {
+                        this.log('Received stop signal');
+                        this.flushAudioBuffer(); // Play any remaining buffered audio
+                    }
+                    
+                } catch (error) {
+                    this.log(`Error parsing message: ${error.message}`);
+                }
+            }
+            
+            bufferAudioData(base64Audio, sampleRate, channels) {
+                try {
+                    // Decode base64 to bytes
+                    const binaryString = atob(base64Audio);
+                    const bytes = new Uint8Array(binaryString.length);
+                    for (let i = 0; i < binaryString.length; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    
+                    // Add to buffer
+                    this.audioBuffer.push({
+                        data: bytes,
+                        sampleRate: sampleRate,
+                        channels: channels
+                    });
+                    
+                    this.bufferSize += bytes.length;
+                    
+                    // Update status
+                    this.updateAudioStatus(`Buffering audio: ${this.audioBuffer.length} chunks, ${this.bufferSize} bytes`);
+                    
+                    // If buffer is large enough or we haven't started playing, start playback
+                    if ((this.bufferSize >= this.maxBufferSize || this.audioBuffer.length >= 5) && !this.isPlaying) {
+                        this.startBufferedPlayback();
+                    }
+                    
+                } catch (error) {
+                    this.log(`Error buffering audio: ${error.message}`);
+                }
+            }
+            
+            async startBufferedPlayback() {
+                if (this.isPlaying || this.audioBuffer.length === 0) {
+                    return;
+                }
+                
+                this.isPlaying = true;
+                this.log(`Starting buffered playback with ${this.audioBuffer.length} chunks`);
+                this.updateAudioStatus('Playing buffered audio...');
+                
+                try {
+                    // Create playback context if needed
+                    if (!this.playbackContext || this.playbackContext.state === 'closed') {
+                        this.playbackContext = new AudioContext();
+                    }
+                    
+                    // Resume if suspended
+                    if (this.playbackContext.state === 'suspended') {
+                        await this.playbackContext.resume();
+                    }
+                    
+                    // Combine all buffered audio into one continuous stream
+                    const combinedAudio = this.combineAudioBuffers();
+                    
+                    if (combinedAudio.length > 0) {
+                        await this.playAudioBuffer(combinedAudio, this.audioBuffer[0].sampleRate, this.audioBuffer[0].channels);
+                    }
+                    
+                    // Clear the buffer
+                    this.audioBuffer = [];
+                    this.bufferSize = 0;
+                    
+                } catch (error) {
+                    this.log(`Error in buffered playback: ${error.message}`);
+                } finally {
+                    this.isPlaying = false;
+                    this.updateAudioStatus('Ready for more audio...');
+                }
+            }
+            
+            combineAudioBuffers() {
+                if (this.audioBuffer.length === 0) return new Uint8Array(0);
+                
+                // Calculate total size
+                const totalSize = this.audioBuffer.reduce((sum, chunk) => sum + chunk.data.length, 0);
+                
+                // Combine all chunks
+                const combined = new Uint8Array(totalSize);
+                let offset = 0;
+                
+                for (const chunk of this.audioBuffer) {
+                    combined.set(chunk.data, offset);
+                    offset += chunk.data.length;
+                }
+                
+                return combined;
+            }
+            
+            async playAudioBuffer(audioBytes, sampleRate, numChannels) {
+                try {
+                    // Convert bytes to Int16Array
+                    const int16Array = new Int16Array(audioBytes.buffer);
+                    
+                    // Create audio buffer
+                    const audioBuffer = this.playbackContext.createBuffer(
+                        numChannels, 
+                        int16Array.length / numChannels, 
+                        sampleRate
+                    );
+                    
+                    // Fill the audio buffer
+                    for (let channel = 0; channel < numChannels; channel++) {
+                        const channelData = audioBuffer.getChannelData(channel);
+                        for (let i = 0; i < channelData.length; i++) {
+                            const sampleIndex = i * numChannels + channel;
+                            if (sampleIndex < int16Array.length) {
+                                channelData[i] = int16Array[sampleIndex] / 32768.0;
+                            }
+                        }
+                    }
+                    
+                    // Create source and play
+                    const source = this.playbackContext.createBufferSource();
+                    source.buffer = audioBuffer;
+                    
+                    // Add gain control
+                    const gainNode = this.playbackContext.createGain();
+                    gainNode.gain.value = 0.8; // Slightly reduce volume
+                    
+                    source.connect(gainNode);
+                    gainNode.connect(this.playbackContext.destination);
+                    
+                    // Play the audio
+                    return new Promise((resolve) => {
+                        source.onended = () => {
+                            this.log(`Played ${audioBuffer.duration.toFixed(2)}s of audio`);
+                            resolve();
+                        };
+                        source.start();
+                    });
+                    
+                } catch (error) {
+                    this.log(`Error playing audio buffer: ${error.message}`);
+                }
+            }
+            
+            flushAudioBuffer() {
+                if (this.audioBuffer.length > 0 && !this.isPlaying) {
+                    this.log('Flushing remaining audio buffer');
+                    this.startBufferedPlayback();
+                }
+            }
+            
+            updateStatus(text, className) {
+                this.status.textContent = text;
+                this.status.className = `status ${className}`;
+            }
+        }
+        
+        // Initialize the client when the page loads
+        document.addEventListener('DOMContentLoaded', () => {
+            new SmoothAudioClient();
+        });
+    </script>
+</body>
+</html>
